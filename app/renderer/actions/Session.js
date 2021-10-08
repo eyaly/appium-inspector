@@ -1,7 +1,6 @@
 import { getSetting, setSetting, SAVED_SESSIONS, SERVER_ARGS, SESSION_SERVER_TYPE,
          SESSION_SERVER_PARAMS } from '../../shared/settings';
 import { v4 as UUID } from 'uuid';
-import url from 'url';
 import { push } from 'connected-react-router';
 import { notification } from 'antd';
 import { includes, debounce, toPairs, union, without, keys, isUndefined } from 'lodash';
@@ -63,6 +62,7 @@ const CAPS_NEW_COMMAND = 'appium:newCommandTimeout';
 const CAPS_CONNECT_HARDWARE_KEYBOARD = 'appium:connectHardwareKeyboard';
 const CAPS_NATIVE_WEB_SCREENSHOT = 'appium:nativeWebScreenshot';
 const CAPS_ENSURE_WEBVIEW_HAVE_PAGES = 'appium:ensureWebviewsHavePages';
+const CAPS_INCLUDE_SAFARI_IN_WEBVIEWS = 'appium:includeSafariInWebviews';
 
 const AUTO_START_URL_PARAM = '1'; // what should be passed in to ?autoStart= to turn it on
 
@@ -229,6 +229,7 @@ export function newSession (caps, attachSessId = null) {
         https = session.server.remote.ssl;
         break;
       case ServerTypes.sauce:
+        path = '/wd/hub';
         host = `ondemand.${session.server.sauce.dataCenter}.saucelabs.com`;
         port = 80;
         if (session.server.sauce.useSCProxy) {
@@ -248,7 +249,13 @@ export function newSession (caps, attachSessId = null) {
         https = false;
         break;
       case ServerTypes.headspin: {
-        const headspinUrl = url.parse(session.server.headspin.webDriverUrl);
+        let headspinUrl;
+        try {
+          headspinUrl = new URL(session.server.headspin.webDriverUrl);
+        } catch (ign) {
+          showError(new Error(`${session.server.headspin.webDriverUrl} is invalid url`), null, 0);
+          return;
+        }
         host = session.server.headspin.hostname = headspinUrl.hostname;
         port = session.server.headspin.port = headspinUrl.port;
         path = session.server.headspin.path = headspinUrl.pathname;
@@ -276,7 +283,8 @@ export function newSession (caps, attachSessId = null) {
         port = session.server.browserstack.port = process.env.BROWSERSTACK_PORT || 443;
         path = session.server.browserstack.path = '/wd/hub';
         username = session.server.browserstack.username || process.env.BROWSERSTACK_USERNAME;
-        desiredCapabilities['browserstack.source'] = 'appiumdesktop';
+        desiredCapabilities['bstack:options'] = {};
+        desiredCapabilities['bstack:options'].source = 'appiumdesktop';
         accessKey = session.server.browserstack.accessKey || process.env.BROWSERSTACK_ACCESS_KEY;
         if (!username || !accessKey) {
           notification.error({
@@ -326,11 +334,10 @@ export function newSession (caps, attachSessId = null) {
         host = session.server.pcloudy.hostname;
         port = session.server.pcloudy.port = 443;
         path = session.server.pcloudy.path = '/objectspy/wd/hub';
-        username = session.server.pcloudy.username || process.env.PCLOUDY_USERNAME;
-        desiredCapabilities.pCloudy_Username = username;
-        accessKey = session.server.pcloudy.accessKey || process.env.PCLOUDY_ACCESS_KEY;
-        desiredCapabilities.pCloudy_ApiKey = accessKey;
-        if (!username || !accessKey) {
+        desiredCapabilities.pCloudy_Username = session.server.pcloudy.username || process.env.PCLOUDY_USERNAME;
+        desiredCapabilities.pCloudy_ApiKey = session.server.pcloudy.accessKey || process.env.PCLOUDY_ACCESS_KEY;
+        if (!(session.server.pcloudy.username || process.env.PCLOUDY_USERNAME) ||
+              !(session.server.pcloudy.accessKey || process.env.PCLOUDY_ACCESS_KEY)) {
           notification.error({
             message: 'Error',
             description: 'PCLOUDY username and api key are required!',
@@ -343,10 +350,12 @@ export function newSession (caps, attachSessId = null) {
       case ServerTypes.testingbot:
         host = session.server.testingbot.hostname = process.env.TB_HOST || 'hub.testingbot.com';
         port = session.server.testingbot.port = 443;
-        username = session.server.testingbot.key || process.env.TB_KEY;
-        accessKey = session.server.testingbot.secret || process.env.TB_SECRET;
-        desiredCapabilities['tb.source'] = 'appiumdesktop';
-        if (!username || !accessKey) {
+        path = session.server.testingbot.path = '/wd/hub';
+        desiredCapabilities['tb:options'] = {};
+        desiredCapabilities['tb:options'].key = session.server.testingbot.key || process.env.TB_KEY;
+        desiredCapabilities['tb:options'].secret = session.server.testingbot.secret || process.env.TB_SECRET;
+        if (!(session.server.testingbot.key || process.env.TB_KEY) ||
+              !(session.server.testingbot.secret || process.env.TB_SECRET)) {
           notification.error({
             message: 'Error',
             description: i18n.t('testingbotCredentialsRequired'),
@@ -366,7 +375,15 @@ export function newSession (caps, attachSessId = null) {
           return;
         }
         desiredCapabilities['experitest:accessKey'] = session.server.experitest.accessKey;
-        let experitestUrl = url.parse(session.server.experitest.url);
+
+        let experitestUrl;
+        try {
+          experitestUrl = new URL(session.server.experitest.url);
+        } catch (ign) {
+          showError(new Error(`${session.server.experitest.url} is invalid url`), null, 0);
+          return;
+        }
+
         host = session.server.experitest.hostname = experitestUrl.hostname;
         path = session.server.experitest.path = '/wd/hub';
         port = session.server.experitest.port = experitestUrl.port;
@@ -378,7 +395,8 @@ export function newSession (caps, attachSessId = null) {
         port = 443;
         https = session.server.roboticmobi.ssl = true;
         if (caps) {
-          desiredCapabilities.robotic_mobi_token = session.server.roboticmobi.token || process.env.ROBOTIC_MOBI_TOKEN;
+          desiredCapabilities['roboticmobi:options'] = {};
+          desiredCapabilities['roboticmobi:options'].robotic_mobi_token = session.server.roboticmobi.token || process.env.ROBOTIC_MOBI_TOKEN;
         }
         break;
       }
@@ -402,14 +420,18 @@ export function newSession (caps, attachSessId = null) {
     dispatch({type: SESSION_LOADING});
 
 
-    const hostname = username && accessKey ? `${username}:${accessKey}@${host}` : host;
     const serverOpts = {
-      hostname,
+      hostname: host,
       port: parseInt(port, 10),
       protocol: https ? 'https' : 'http',
       path,
       connectionRetryCount: CONN_RETRIES,
     };
+
+    if (username && accessKey) {
+      serverOpts.user = username;
+      serverOpts.key = accessKey;
+    }
 
     // If a newCommandTimeout wasn't provided, set it to 0 so that sessions don't close on users
     if (isUndefined(desiredCapabilities[CAPS_NEW_COMMAND])) {
@@ -797,25 +819,21 @@ export function setVisibleProviders () {
  * @param {object} caps
  */
 function addCustomCaps (caps) {
-  const {browserName = '', platformName = ''} = caps;
-  const safariCustomCaps = {
-    // Add the includeSafariInWebviews for future HTML detection
-    includeSafariInWebviews: true,
-  };
-  const chromeCustomCaps = {};
-  // Make sure the screenshot is taken of the whole screen when the ChromeDriver is used
-  chromeCustomCaps[CAPS_NATIVE_WEB_SCREENSHOT] = true;
-
+  const {platformName = ''} = caps;
   const androidCustomCaps = {};
   // @TODO: remove when this is defaulted in the newest Appium 1.8.x release
   androidCustomCaps[CAPS_ENSURE_WEBVIEW_HAVE_PAGES] = true;
+  // Make sure the screenshot is taken of the whole screen when the ChromeDriver is used
+  androidCustomCaps[CAPS_NATIVE_WEB_SCREENSHOT] = true;
 
   const iosCustomCaps = {};
+  // Always add the includeSafariInWebviews for future HTML detection
+  // This will ensure that if you use AD to switch between App and browser
+  // that it can detect Safari as a webview
+  iosCustomCaps[CAPS_INCLUDE_SAFARI_IN_WEBVIEWS] = true;
 
   return {
     ...caps,
-    ...(browserName.toLowerCase() === 'safari' ? safariCustomCaps : {}),
-    ...(browserName.toLowerCase() === 'chrome' ? chromeCustomCaps : {}),
     ...(platformName.toLowerCase() === 'android' ? androidCustomCaps : {}),
     ...(platformName.toLowerCase() === 'ios' ? iosCustomCaps : {}),
   };
